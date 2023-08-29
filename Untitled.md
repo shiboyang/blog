@@ -73,12 +73,13 @@
 
 ##### 概述
 
-* YOLOV2是针对V1存在的问题进行了更新，技术上在每一层的后面都添加了**Batch Normalization**，有效的提升了模型的训练速度和精度。引入了**Anchor机制**也是为了解决在同一个场景中存在尺寸变化较大的目标。在结构上作者认为在模型的浅层（就是前几层）包含的是目标的纹理信息--是有利与做目标的检测任务，模型的深层更关注模型的语义信息--有助于做分类任务。所以在结构上模型增加了**passthrough layer**直接将浅层的数据经过一个“reorg层”的处理，concatnate到一起，这样在深**层就同时包含了位置信息和语义信息**。修改了Loss函数，让函数预测偏移量并**对$t_x,t_y$添加了激活函数的限制--更利于模型在训练初期的稳定性**。移**除了最后的两个全连接层和一个pooling层**，删除全连接层后模型可以接受多种分辨率的输入，移除最后一个pooling层后最后的特征图从原来的7x7 增长到了13x13，也是为了提高模型对小目标和密集目标的检测能力。在训练方面，因为移除了最后的全连接层，**使用了多尺度训练**，使得模型更加鲁棒。
+* YOLOV2是针对V1存在的问题进行了更新，技术上在每一层的后面都添加了**Batch Normalization**，有效的提升了模型的训练速度和精度。引入了**Anchor机制**也是为了针对，在同一个场景下的存在尺寸变化较大的目标以及小目标检测的问题。在结构上作者认为在模型的浅层（就是前几层）包含的是目标的纹理信息--对于做目标检测是有帮助的，模型的深层更关注模型的语义信息--有助于做分类任务。所以在结构上模型增加了**passthrough layer**直接将浅层的数据经过一个“reorg层”的处理，concatnate到一起，这样在深**层就同时包含了位置信息和语义信息**。修改了Loss函数，让函数预测偏移量并**对$t_x,t_y$添加了一个函数对输出结果限制输出范围--有利于模型在训练初期的稳定性。移除了最后的两个全连接层和一个pooling层**，删除全连接层后模型可以接受多种分辨率的输入，移除最后一个pooling层后最后的特征图从原来的7x7 增长到了13x13，也是为了提高模型对小目标和稠密目标的检测能力。在训练方面，因为移除了最后的全连接层，**使用了多尺度训练**，使得模型更加鲁棒。
 
 ##### 结构
 
 * 移除了fully connected layer
 * 增加了passthrough layer直接将浅层输出通过reorg层，拼接到深层输出中
+* DarkNet19
 
 ##### 输入 输出
 
@@ -88,6 +89,7 @@
 
 ##### Loss函数
 
+softmax
 $$
 Loss = (t^p_x - t^g_x)^2 + (t^p_y-t^g_y)^2+(t^p_w - t^g_w)^2 + (t^p_h - t^g_h)^2
 $$
@@ -100,30 +102,106 @@ $$
 * decode
   * 从模型的输出到计算$b_x, b_y, b_w, b_h$的过程称为decode
 
-##### 知识点
+##### Batter
+
+1. **Batch Normalization**
+
+$$
+Y = {X - \mu \over \sqrt{Var(X)+\epsilon}} \cdot \gamma + \beta
+$$
+
+* Motivation：	
+  * 如果一个模型在训练过程中，模型在每个维度的梯度差异较大时，就会导致模型的训练不容易收敛。例如一个模型在训练过程中，如果每个输入数据的维度之间存在较大的Scale，这就会导致模型在每个维度上的更新梯度的斜率差异比较大，所以会导致模型不易收敛，不容易找到Loss的最低点。
+
+* 怎么解决这样的问题：
+  * 在模型每一层的输入前能够**将数据的每一维都进行标准化**，这样可以保证每一维输出的数据没有较大的差异。在深度学习中我们的数据是以batch进行训练的，因此每次的计算都是基于**Batch**计算的，也称为Batch Normalization。因此使用该方式训练中batch也不能太小。
+
+* 参数$\gamma,\beta$是两个可学习参数，虽然我们在训练过程中对每个维度的数据进行了标准化（让模型的每个维度输出的数据在相同的范围内），但是如果模型在训练过程中认为某一维可能不应该是这个范围，所以添加了两个可学习参数来弥补不应该被标准话的层。
+
+2. **High Resolution Classifier** 
+   * 将分类器的输入从224提升至448，大约提升了4%mAP
+3. **Convolutional With Anchor Boxes**
+   * 参考了Faster RCNN的RPN网络，将用于预测Anchor Boxes的全连接层移除，使用卷积代替。在原始7x7的特征图上放置最多预测98个锚框，使用Anchor  Boxes的方式使锚框的数量上升到1k多个。
+4. **Dimension Clusters**
+   * 使用Anchor Boxes这种放置锚框的方式使训练遇到了两个问题，第一个问题就是手动选择的锚框真的好吗？作者使用K-means方式在训练集上聚类了新的锚框尺寸，标准K-means使用的是欧氏距离的方式，然而这种计算方式对锚框聚类来说并不是一个好的计算方式，为了消除尺寸大的锚框和小锚框在聚类中的偏差，使聚类函数与Box的size无关，作者使用了IOU作为聚类函数的****，来进行聚类。通过实验表明手动选择9个尺寸和聚类选择5个尺寸几乎达到了一样的效果。
+5. **Direct Location prediction**
+   * 引入Anchor Boxes遇到的第二问题就是：在模型训练初期的不稳定问题。实验表明，在模型的训练初期不稳定的值在于预测x,y上。因为在YOLO中有一个cell的概念，每个Anchor Box坐落于一个cell中，所以作者在预测的$t_x, t_y$上添加了一个激活函数的限制$\sigma(t_x),\sigma(t_y)$，添加限制后使得参数更容易学习，模型也更加的稳定。
+6. **Fine-Grained Feature**
+   *  这是对模型认知层面上的新思路。作者认为在模型的浅层网络学习到的是模型的**纹理信息**，模型的深层网络学习到的是模型的**语义信息**。物理信息就像是一些模型的边、角、等特征，这些特征有利于定位目标，而语义信息更关注与目标的分类。所以这次优化是在模型的结构上进行的，添加了一个passthrogh层，用来将浅层的纹理信息和后面的语义信息融合，融合过程中添加了reorg层，将大的纹理特征图切分为小的特征图和语义信息融合。
+7. **Mutil-Scale Training**
+   * 多尺度训练，为了使模型能够对各种尺寸的输入图片更加鲁棒，并且模型中只存在convolutional和pooling层，所以模型可以在运行中resize。模型在训练过程中接受多尺寸的输入。每10个batch从320-608，以32为倍数的尺寸中选择一个作为网络的输入尺寸。
+   * This regime forces the network to learn to predict well across a variety of input dimensions
+8. **Further Experiments**
+   * 更丰富的实验
+
+##### 其他
 
 * 为什么模型不能直接输出$x_p, y_p, w_p, h_P$, 然后再用这些值去算呢？
 
   * 因为我们规定了模型的输出就是offset，然后使用偏移量去计算真正的预测结果。
 
-* Batch Normalization
-  $$
-  Y = {X - \mu \over \sqrt{Var(X)+\epsilon}} \cdot \gamma + \beta
-  $$
-
-  * Motivation
-    * 如果一个模型在训练过程中，模型在每个维度的梯度差异较大时，就会导致模型的训练不容易收敛。例如一个模型在训练过程中，如果每个输入维度的数据存在比较大的Scale的情况，这就会导致模型在每个维度上的更新梯度的斜率差异比较大，所以会导致模型不易收敛，不容易找到Loss的最低点。
-    * 如何解决上面的问题呢？
-    * 在模型每一层的输入前能够**将数据的每一维都进行标准化**，这样可以保证每一维输出的数据没有较大的差异。在深度学习中我们的数据是以batch进行训练的，因此每次的计算都是基于**Batch**计算的，也称为Batch Normalization。因此使用该方式训练中batch也不能太小。
-    * $\gamma,\beta$是两个可学习参数，虽然我们在训练过程中对每个维度的数据进行了标准化（让模型的每个维度输出的数据在相同的范围内），但是如果模型在训练过程中认为某一维可能不应该是这个范围，所以添加了两个自动调节的参数来调整这一层的Batch的影响。
-
 * K-Means
+
+  * ```python
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from sklearn.datasets._samples_generator import make_blobs
+    
+    def make_dataset():
+        return make_blobs(n_samples=100,
+                          n_features=2,
+                          centers=4,
+                          cluster_std=0.6,
+                          random_state=0
+                          )
+    
+    
+    def main():
+        # create dataset
+        dataset = make_dataset()
+        points, _ = dataset
+    
+        plt.scatter(points[:, 0], points[:, 1])
+        plt.show()
+        # initialize centroids
+        K = 4
+        centers = points[:K]
+        N = points.shape[0]
+        truth_table = np.zeros([N, K])
+    
+        while True:
+            # calculate the E2 distance between the center and points
+            for i in range(K):
+                truth_table[:, i] = np.linalg.norm(points - centers[i], axis=1)
+    
+            min_dis_index = np.argmin(truth_table, axis=1)
+            old_centers = centers.copy()
+            for i in range(K):
+                mask = min_dis_index == i
+                centers[i] = np.average(points[mask], axis=0)
+                x, y = points[mask][:, 0], points[mask][:, 1]
+                plt.scatter(x, y)
+    
+            plt.show()
+            if np.array_equal(old_centers, centers):
+                print("Finsh compute")
+                break
+    ```
+
+* reorg层
+
+* shortcut
 
 * 
 
 #### YOLO-V3
 
-
+* resnet
+* softmax-》logistic regression
+* optimizer
+  * sgd + monmenten
+  * adam
+  * ...
 
 
 
